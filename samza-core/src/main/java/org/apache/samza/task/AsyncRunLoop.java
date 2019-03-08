@@ -27,11 +27,14 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.samza.SamzaException;
 import org.apache.samza.container.SamzaContainerMetrics;
@@ -66,10 +69,12 @@ public class AsyncRunLoop implements Runnable, Throttleable {
   private final long windowMs;
   private final long commitMs;
   private final long callbackTimeoutMs;
+  private final long commitTimeoutMs;
   private final long maxIdleMs;
   private final SamzaContainerMetrics containerMetrics;
   private final ScheduledExecutorService workerTimer;
   private final ScheduledExecutorService callbackTimer;
+  private final ScheduledExecutorService commitTimer;
   private final ThrottlingScheduler callbackExecutor;
   private volatile boolean shutdownNow = false;
   private volatile Throwable throwable = null;
@@ -88,7 +93,8 @@ public class AsyncRunLoop implements Runnable, Throttleable {
       long maxIdleMs,
       SamzaContainerMetrics containerMetrics,
       HighResolutionClock clock,
-      boolean isAsyncCommitEnabled) {
+      boolean isAsyncCommitEnabled,
+      long commitTimeoutMs) {
 
     this.threadPool = threadPool;
     this.consumerMultiplexer = consumerMultiplexer;
@@ -112,6 +118,8 @@ public class AsyncRunLoop implements Runnable, Throttleable {
     this.sspToTaskWorkerMapping = Collections.unmodifiableMap(getSspToAsyncTaskWorkerMap(taskInstances, workers));
     this.taskWorkers = Collections.unmodifiableList(new ArrayList<>(workers.values()));
     this.isAsyncCommitEnabled = isAsyncCommitEnabled;
+    this.commitTimeoutMs = commitTimeoutMs;
+    this.commitTimer = (commitTimeoutMs > 0) ? Executors.newSingleThreadScheduledExecutor() : null;
   }
 
   /**
@@ -543,7 +551,8 @@ public class AsyncRunLoop implements Runnable, Throttleable {
 
       if (threadPool != null) {
         log.trace("Task {} commits on the thread pool", task.taskName());
-        threadPool.submit(commitWorker);
+        CompletableFuture.runAsync(commitWorker, threadPool).acceptEither();
+        Future commitFuture = threadPool.submit(commitWorker);
       } else {
         log.trace("Task {} commits on the run loop thread", task.taskName());
         commitWorker.run();
@@ -712,8 +721,8 @@ public class AsyncRunLoop implements Runnable, Throttleable {
        * a) When process, window, commit and scheduler are not in progress.
        * b) When task.async.commit is true and window, commit are not in progress.
        */
-      if (needCommit) {
-        return (messagesInFlight.get() == 0 || isAsyncCommitEnabled) && !opInFlight;
+      if (needCommit && !opInFlight) {
+        return messagesInFlight.get() == 0 || isAsyncCommitEnabled;
       } else if (needWindow || needScheduler || endOfStream) {
         /*
          * A task is ready for window, scheduler or end-of-stream operation.

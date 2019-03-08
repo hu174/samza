@@ -95,6 +95,10 @@ public class RunLoopFactory {
 
       log.info("Got maxIdleMs: {}.", maxIdleMs);
 
+      Long commitTimeout = config.getCommitTimeoutMs();
+
+      log.info("Got commitTimeout: {}.", commitTimeout);
+
       log.info("Run loop in asynchronous mode.");
 
       return new AsyncRunLoop(
@@ -109,7 +113,8 @@ public class RunLoopFactory {
         maxIdleMs,
         containerMetrics,
         clock,
-        isAsyncCommitEnabled);
+        isAsyncCommitEnabled,
+        commitTimeout);
     }
   }
 
